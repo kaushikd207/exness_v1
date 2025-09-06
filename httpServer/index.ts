@@ -31,8 +31,8 @@ app.post("/signup", (req, res) => {
     port: 587,
     secure: false,
     auth: {
-      user: "kaushikd207@gmail.com",
-      pass: "jeid oqip kkbh pomr",
+      user: process.env.USER_NAME,
+      pass: process.env.PASSWORD,
     },
   });
 

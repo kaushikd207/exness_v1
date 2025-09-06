@@ -37,7 +37,7 @@ ws.on("message", async function message(data) {
 });
 
 const addUpdatedPrice = (jsonTrade: any) => [
-  setTimeout(async () => {
+  setInterval(async () => {
     await publisherStream.xAdd("trades", "*", {
       action: "UPDATED_PRICE",
       updatedPrice: jsonTrade,
