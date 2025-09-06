@@ -1,4 +1,3 @@
-// engine.ts
 import redis from "redis";
 
 const client = redis.createClient();
@@ -24,12 +23,10 @@ try {
   }
 }
 
-// Engine state
 let BALANCE = 5000;
 let OPEN_ORDERS: any[] = [];
 let UPDATE_PRICE: any[] = [];
 
-// 🔄 Load snapshot on startup
 async function loadSnapshot() {
   const snapshot = await client.get(SNAPSHOT_KEY);
   if (snapshot) {
@@ -37,31 +34,32 @@ async function loadSnapshot() {
     BALANCE = parsed.balance ?? BALANCE;
     OPEN_ORDERS = parsed.openOrders ?? [];
     UPDATE_PRICE = parsed.updatePrice ?? [];
-    console.log("♻️ Snapshot loaded", parsed);
+    console.log("Snapshot loaded", parsed);
   } else {
-    console.log("⚠️ No snapshot found, starting fresh");
+    console.log("No snapshot found, starting fresh");
   }
 }
 
-// 💾 Save snapshot periodically
 async function saveSnapshot() {
   const snapshot = {
     balance: BALANCE,
     openOrders: OPEN_ORDERS,
-    updatePrice: UPDATE_PRICE.slice(-100), // keep last 100 prices
+    updatePrice: UPDATE_PRICE.slice(-100),
     timestamp: Date.now(),
   };
   await client.set(SNAPSHOT_KEY, JSON.stringify(snapshot));
   console.log("💾 Snapshot saved", snapshot);
 }
 
-// Save snapshot every 5 seconds
 setInterval(saveSnapshot, 5000);
 
 await loadSnapshot();
 
 async function publishResponse(orderId: string, payload: any) {
-  await publisher.publish(`trade_response_${orderId}`, JSON.stringify(payload));
+  await publisher.xAdd("trade_responses", "*", {
+    orderId,
+    response: JSON.stringify(payload),
+  });
 }
 
 while (true) {
@@ -82,8 +80,8 @@ while (true) {
         case "UPDATED_PRICE": {
           const updatePrice = JSON.parse(data.updatedPrice);
           UPDATE_PRICE.push(updatePrice);
-          if (UPDATE_PRICE.length > 1000) UPDATE_PRICE.shift(); // cap memory
-          console.log("📈 Price updated", updatePrice);
+          if (UPDATE_PRICE.length > 1000) UPDATE_PRICE.shift();
+          console.log("Price updated", updatePrice.data);
           break;
         }
 
@@ -96,10 +94,10 @@ while (true) {
               reason: "Insufficient funds",
             });
           } else {
-            BALANCE -= margin; // lock margin
+            BALANCE -= margin;
             OPEN_ORDERS.push({ ...data, margin });
             console.log(
-              ` Order created: ${data.orderId}, Locked margin: ${margin}, Remaining balance: ${BALANCE}`
+              `✅ Order created: ${data.orderId}, Locked margin: ${margin}, Remaining balance: ${BALANCE}`
             );
             await publishResponse(data.orderId, {
               status: "success",
@@ -113,10 +111,10 @@ while (true) {
         case "CLOSE_ORDER": {
           const order = OPEN_ORDERS.find((o) => o.orderId === data.orderId);
           if (order) {
-            BALANCE += order.margin; // unlock margin
+            BALANCE += order.margin;
             OPEN_ORDERS = OPEN_ORDERS.filter((o) => o.orderId !== data.orderId);
             console.log(
-              `Order closed: ${data.orderId}, Unlocked margin: ${order.margin}, Balance: ${BALANCE}`
+              `✅ Order closed: ${data.orderId}, Unlocked margin: ${order.margin}, Balance: ${BALANCE}`
             );
             await publishResponse(data.orderId, {
               status: "closed",
@@ -133,7 +131,7 @@ while (true) {
         }
 
         case "CHECK_BALANCE": {
-          console.log(" Balance check", data.userId, BALANCE);
+          console.log("💰 Balance check", data.userId, BALANCE);
           await publishResponse(data.orderId, {
             balance: BALANCE,
           });
@@ -142,7 +140,6 @@ while (true) {
 
         case "CHECK_USD_BALANCE": {
           console.log("USD Balance check", data.userId, BALANCE);
-
           await publishResponse(data.orderId, {
             usdBalance: BALANCE,
           });
@@ -150,7 +147,7 @@ while (true) {
         }
 
         default:
-          console.log("⚠️ Unknown action", msg.message);
+          console.log("Unknown action", msg.message);
       }
 
       await client.xAck(STREAM, GROUP, msg.id);

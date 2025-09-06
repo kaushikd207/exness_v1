@@ -15,6 +15,47 @@ await publisher.connect();
 
 client.on("error", (err) => console.log("Redis Client Error", err));
 
+async function sendAndWaitResponse(
+  orderId: string,
+  payload: Record<string, any>,
+  res: any
+) {
+  return new Promise(async (resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error("Timeout: No response from engine"));
+    }, 10000);
+    await publisher.xAdd("trades", "*", payload);
+
+    try {
+      let lastId = "$";
+
+      while (true) {
+        const messages = await client.xRead(
+          [{ key: "trade_responses", id: lastId }],
+          { BLOCK: 5000, COUNT: 1 }
+        );
+
+        if (!messages) continue;
+
+        for (const stream of messages) {
+          for (const msg of stream.messages) {
+            lastId = msg.id;
+            const { orderId: respOrderId, response } = msg.message;
+            if (respOrderId === orderId) {
+              clearTimeout(timeout);
+              res.json({ message: JSON.parse(response) });
+              return resolve(true);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      clearTimeout(timeout);
+      reject(err);
+    }
+  });
+}
+
 app.post("/signup", (req, res) => {
   const { email } = req.body;
 
@@ -39,7 +80,7 @@ app.post("/signup", (req, res) => {
   transporter.sendMail({
     from: "shemdas21@gmail.com",
     to: email,
-    subject: "Hello ✔",
+    subject: "Please Verify your email",
     text: `http://localhost:3000/verify/${token}`,
     html: `Please verify this mail <a href="http://localhost:3000/verify/${token}">Verify</a>`,
   });
@@ -56,29 +97,6 @@ app.get("/verify/:token", (req, res) => {
     res.json({ message: "Email verified successfully" });
   });
 });
-
-async function sendAndWaitResponse(
-  orderId: string,
-  payload: Record<string, any>,
-  res: any
-) {
-  return new Promise(async (resolve, reject) => {
-    const timeout = setTimeout(() => {
-      client.unsubscribe(`trade_response_${orderId}`);
-      reject(new Error("Timeout: No response from engine"));
-    }, 10000);
-
-    await client.subscribe(`trade_response_${orderId}`, (message) => {
-      clearTimeout(timeout);
-      client.unsubscribe(`trade_response_${orderId}`);
-      const response = JSON.parse(message);
-      res.json({ message: response });
-      resolve(true);
-    });
-
-    await publisher.xAdd("trades", "*", payload);
-  });
-}
 
 app.post("/api/v1/trade/create", async (req, res) => {
   const { asset, type, margin, leverage, slippage } = req.body;
@@ -110,41 +128,29 @@ app.post("/api/v1/trade/close", async (req, res) => {
 
   await sendAndWaitResponse(
     orderId,
-    {
-      action: "CLOSE_ORDER",
-      orderId,
-      userId,
-    },
+    { action: "CLOSE_ORDER", orderId, userId },
     res
   );
 });
 
 app.get("/api/v1/balance", async (req, res) => {
-  const { userId } = req.body;
+  const { userId } = req.query;
   const orderId = uuidv4();
 
   await sendAndWaitResponse(
     orderId,
-    {
-      action: "CHECK_BALANCE",
-      orderId,
-      userId,
-    },
+    { action: "CHECK_BALANCE", orderId, userId },
     res
   );
 });
 
 app.get("/api/v1/balance_usd", async (req, res) => {
-  const { userId } = req.body;
+  const { userId } = req.query;
   const orderId = uuidv4();
 
   await sendAndWaitResponse(
     orderId,
-    {
-      action: "CHECK_USD_BALANCE",
-      orderId,
-      userId,
-    },
+    { action: "CHECK_USD_BALANCE", orderId, userId },
     res
   );
 });
@@ -152,3 +158,5 @@ app.get("/api/v1/balance_usd", async (req, res) => {
 app.listen(3000, () => {
   console.log("Server started on port 3000");
 });
+
+export default app;
