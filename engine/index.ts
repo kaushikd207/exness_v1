@@ -11,6 +11,7 @@ await publisher.connect();
 const STREAM = "trades";
 const GROUP = "engine-group";
 const CONSUMER = "engine-1";
+const SNAPSHOT_KEY = "engine_snapshot";
 
 try {
   await client.xGroupCreate(STREAM, GROUP, "0", { MKSTREAM: true });
@@ -23,9 +24,41 @@ try {
   }
 }
 
+// Engine state
 let BALANCE = 5000;
 let OPEN_ORDERS: any[] = [];
 let UPDATE_PRICE: any[] = [];
+
+// 🔄 Load snapshot on startup
+async function loadSnapshot() {
+  const snapshot = await client.get(SNAPSHOT_KEY);
+  if (snapshot) {
+    const parsed = JSON.parse(snapshot);
+    BALANCE = parsed.balance ?? BALANCE;
+    OPEN_ORDERS = parsed.openOrders ?? [];
+    UPDATE_PRICE = parsed.updatePrice ?? [];
+    console.log("♻️ Snapshot loaded", parsed);
+  } else {
+    console.log("⚠️ No snapshot found, starting fresh");
+  }
+}
+
+// 💾 Save snapshot periodically
+async function saveSnapshot() {
+  const snapshot = {
+    balance: BALANCE,
+    openOrders: OPEN_ORDERS,
+    updatePrice: UPDATE_PRICE.slice(-100), // keep last 100 prices
+    timestamp: Date.now(),
+  };
+  await client.set(SNAPSHOT_KEY, JSON.stringify(snapshot));
+  console.log("💾 Snapshot saved", snapshot);
+}
+
+// Save snapshot every 5 seconds
+setInterval(saveSnapshot, 5000);
+
+await loadSnapshot();
 
 async function publishResponse(orderId: string, payload: any) {
   await publisher.publish(`trade_response_${orderId}`, JSON.stringify(payload));
@@ -49,6 +82,7 @@ while (true) {
         case "UPDATED_PRICE": {
           const updatePrice = JSON.parse(data.updatedPrice);
           UPDATE_PRICE.push(updatePrice);
+          if (UPDATE_PRICE.length > 1000) UPDATE_PRICE.shift(); // cap memory
           console.log("📈 Price updated", updatePrice);
           break;
         }
