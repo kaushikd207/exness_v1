@@ -17,7 +17,8 @@ try {
   console.log("Consumer group created");
 } catch (err: any) {
   if (err.message.includes("BUSYGROUP")) {
-    console.log("Consumer group already exists");
+    await client.xGroupDestroy(STREAM, GROUP);
+    await client.xGroupCreate(STREAM, GROUP, "0");
   } else {
     throw err;
   }
@@ -27,6 +28,7 @@ let BALANCE = 5000;
 let OPEN_ORDERS: any[] = [];
 let UPDATE_PRICE: any[] = [];
 
+// ---------------- Snapshot -----------------
 async function loadSnapshot() {
   const snapshot = await client.get(SNAPSHOT_KEY);
   if (snapshot) {
@@ -34,9 +36,6 @@ async function loadSnapshot() {
     BALANCE = parsed.balance ?? BALANCE;
     OPEN_ORDERS = parsed.openOrders ?? [];
     UPDATE_PRICE = parsed.updatePrice ?? [];
-    console.log("Snapshot loaded", parsed);
-  } else {
-    console.log("No snapshot found, starting fresh");
   }
 }
 
@@ -48,22 +47,61 @@ async function saveSnapshot() {
     timestamp: Date.now(),
   };
   await client.set(SNAPSHOT_KEY, JSON.stringify(snapshot));
-  console.log("💾 Snapshot saved", snapshot);
 }
-
 setInterval(saveSnapshot, 5000);
-
 await loadSnapshot();
 
+// ---------------- Publisher -----------------
 async function publishResponse(orderId: string, payload: any) {
+
+
+  console.log("Published res ", JSON.stringify(payload));
   await publisher.xAdd("trade_responses", "*", {
     orderId,
     response: JSON.stringify(payload),
   });
 }
 
+// ---------------- Liquidation Logic -----------------
+async function checkLiquidations(latestPrice: any) {
+  const { s: symbol, p: price } = latestPrice.data;
+  const currentPrice = parseFloat(price);
+
+  for (const order of [...OPEN_ORDERS]) {
+    if (order.asset !== symbol) continue;
+
+    const entryPrice = parseFloat(order.entryPrice);
+    const margin = parseFloat(order.margin);
+    const leverage = parseFloat(order.leverage);
+
+    const notional = margin * leverage;
+    let pnl = 0;
+
+    if (order.type.toUpperCase() === "LONG") {
+      pnl = (currentPrice - entryPrice) * (notional / entryPrice);
+    } else if (order.type.toUpperCase() === "SHORT") {
+      pnl = (entryPrice - currentPrice) * (notional / entryPrice);
+    }
+
+    if (pnl <= -margin) {
+
+      OPEN_ORDERS = OPEN_ORDERS.filter((o) => o.orderId !== order.orderId);
+
+      await publishResponse(order.orderId, {
+        status: "liquidated",
+        orderId: order.orderId,
+        symbol,
+        entryPrice,
+        liquidationPrice: currentPrice,
+        balance: BALANCE,
+      });
+    }
+  }
+}
+
+// ---------------- Engine Main Loop -----------------
 while (true) {
-  const res = await client.xReadGroup(
+  const res:any = await client.xReadGroup(
     GROUP,
     CONSUMER,
     [{ key: STREAM, id: ">" }],
@@ -81,27 +119,48 @@ while (true) {
           const updatePrice = JSON.parse(data.updatedPrice);
           UPDATE_PRICE.push(updatePrice);
           if (UPDATE_PRICE.length > 1000) UPDATE_PRICE.shift();
-          console.log("Price updated", updatePrice.data);
+          await checkLiquidations(updatePrice);
           break;
         }
 
         case "CREATE_ORDER": {
           const margin = parseFloat(data.margin);
+          console.log(data)
+          let entryPrice = UPDATE_PRICE.length
+            ? parseFloat(UPDATE_PRICE[UPDATE_PRICE.length - 1].data.p)
+            : NaN;
+
+          // normalize type
+          let orderType = data.type?.toUpperCase();
+          if (orderType === "BUY") orderType = "LONG";
+          if (orderType === "SELL") orderType = "SHORT";
+
+          if (isNaN(entryPrice)) {
+            await publishResponse(data.orderId, {
+              status: "error",
+              reason: "No market price available",
+            });
+            break;
+          }
+
           if (margin > BALANCE) {
-            console.log("Insufficient funds for order", data.orderId);
             await publishResponse(data.orderId, {
               status: "error",
               reason: "Insufficient funds",
             });
           } else {
             BALANCE -= margin;
-            OPEN_ORDERS.push({ ...data, margin });
-            console.log(
-              `✅ Order created: ${data.orderId}, Locked margin: ${margin}, Remaining balance: ${BALANCE}`
-            );
+            const newOrder = {
+              ...data,
+              type: orderType,
+              margin,
+              entryPrice,
+            };
+            OPEN_ORDERS.push(newOrder);
+
             await publishResponse(data.orderId, {
               status: "success",
-              order: data,
+              order: newOrder,
               balance: BALANCE,
             });
           }
@@ -113,9 +172,7 @@ while (true) {
           if (order) {
             BALANCE += order.margin;
             OPEN_ORDERS = OPEN_ORDERS.filter((o) => o.orderId !== data.orderId);
-            console.log(
-              `✅ Order closed: ${data.orderId}, Unlocked margin: ${order.margin}, Balance: ${BALANCE}`
-            );
+      
             await publishResponse(data.orderId, {
               status: "closed",
               orderId: data.orderId,
@@ -131,7 +188,6 @@ while (true) {
         }
 
         case "CHECK_BALANCE": {
-          console.log("💰 Balance check", data.userId, BALANCE);
           await publishResponse(data.orderId, {
             balance: BALANCE,
           });
@@ -147,7 +203,6 @@ while (true) {
         }
 
         default:
-          console.log("Unknown action", msg.message);
       }
 
       await client.xAck(STREAM, GROUP, msg.id);

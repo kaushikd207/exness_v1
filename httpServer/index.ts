@@ -23,27 +23,33 @@ async function sendAndWaitResponse(
   return new Promise(async (resolve, reject) => {
     const timeout = setTimeout(() => {
       reject(new Error("Timeout: No response from engine"));
-    }, 10000);
+    }, 30000);
     await publisher.xAdd("trades", "*", payload);
+    console.log("➡️ Published order to trades:", payload);
 
     try {
       let lastId = "$";
 
       while (true) {
-        const messages = await client.xRead(
+        const messages:any = await client.xRead(
           [{ key: "trade_responses", id: lastId }],
-          { BLOCK: 5000, COUNT: 1 }
+          { BLOCK: 0, COUNT: 1 }
         );
+
+        console.log(messages);
 
         if (!messages) continue;
 
         for (const stream of messages) {
           for (const msg of stream.messages) {
             lastId = msg.id;
+            console.log("msg", msg);
             const { orderId: respOrderId, response } = msg.message;
             if (respOrderId === orderId) {
-              clearTimeout(timeout);
+              console.log(response);
+
               res.json({ message: JSON.parse(response) });
+              clearTimeout(timeout);
               return resolve(true);
             }
           }
@@ -154,9 +160,8 @@ app.get("/api/v1/balance_usd", async (req, res) => {
     res
   );
 });
+export default app;
 
 app.listen(3000, () => {
   console.log("Server started on port 3000");
 });
-
-export default app;
