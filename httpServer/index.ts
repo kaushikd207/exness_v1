@@ -23,9 +23,8 @@ async function sendAndWaitResponse(
   return new Promise(async (resolve, reject) => {
     const timeout = setTimeout(() => {
       reject(new Error("Timeout: No response from engine"));
-    }, 30000);
+    }, 10000);
     await publisher.xAdd("trades", "*", payload);
-    console.log("➡️ Published order to trades:", payload);
 
     try {
       let lastId = "$";

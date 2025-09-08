@@ -26,7 +26,7 @@ try {
 
 let BALANCE = 5000;
 let OPEN_ORDERS: any[] = [];
-let UPDATE_PRICE: any[] = [];
+let UPDATE_PRICE: Map<string, any> = new Map();
 
 // ---------------- Snapshot -----------------
 async function loadSnapshot() {
@@ -35,15 +35,32 @@ async function loadSnapshot() {
     const parsed = JSON.parse(snapshot);
     BALANCE = parsed.balance ?? BALANCE;
     OPEN_ORDERS = parsed.openOrders ?? [];
-    UPDATE_PRICE = parsed.updatePrice ?? [];
+
+    if (parsed.updatePrice) {
+      UPDATE_PRICE = new Map();
+      if (Array.isArray(parsed.updatePrice)) {
+        parsed.updatePrice.forEach((item: any) => {
+          if (item.s && item.p) {
+            UPDATE_PRICE.set(item.s, item.p);
+          }
+        });
+      } else if (parsed.updatePrice instanceof Object) {
+        Object.entries(parsed.updatePrice).forEach(([key, value]) => {
+          UPDATE_PRICE.set(key, value);
+        });
+      }
+    }
   }
 }
 
 async function saveSnapshot() {
+
+  const updatePriceObject = Object.fromEntries(UPDATE_PRICE);
+
   const snapshot = {
     balance: BALANCE,
     openOrders: OPEN_ORDERS,
-    updatePrice: UPDATE_PRICE.slice(-100),
+    updatePrice: updatePriceObject,
     timestamp: Date.now(),
   };
   await client.set(SNAPSHOT_KEY, JSON.stringify(snapshot));
@@ -53,8 +70,6 @@ await loadSnapshot();
 
 // ---------------- Publisher -----------------
 async function publishResponse(orderId: string, payload: any) {
-
-
   console.log("Published res ", JSON.stringify(payload));
   await publisher.xAdd("trade_responses", "*", {
     orderId,
@@ -84,7 +99,6 @@ async function checkLiquidations(latestPrice: any) {
     }
 
     if (pnl <= -margin) {
-
       OPEN_ORDERS = OPEN_ORDERS.filter((o) => o.orderId !== order.orderId);
 
       await publishResponse(order.orderId, {
@@ -101,7 +115,7 @@ async function checkLiquidations(latestPrice: any) {
 
 // ---------------- Engine Main Loop -----------------
 while (true) {
-  const res:any = await client.xReadGroup(
+  const res: any = await client.xReadGroup(
     GROUP,
     CONSUMER,
     [{ key: STREAM, id: ">" }],
@@ -117,24 +131,28 @@ while (true) {
       switch (action) {
         case "UPDATED_PRICE": {
           const updatePrice = JSON.parse(data.updatedPrice);
-          UPDATE_PRICE.push(updatePrice);
-          if (UPDATE_PRICE.length > 1000) UPDATE_PRICE.shift();
+          UPDATE_PRICE.set(updatePrice.data.s, updatePrice.data.p);
+
+          // Optional: Limit map size if needed (keep only recent symbols)
+          if (UPDATE_PRICE.size > 1000) {
+            const firstKey:any = UPDATE_PRICE.keys().next().value;
+            UPDATE_PRICE.delete(firstKey);
+          }
+
           await checkLiquidations(updatePrice);
           break;
         }
 
         case "CREATE_ORDER": {
           const margin = parseFloat(data.margin);
-          console.log(data)
-          let entryPrice = UPDATE_PRICE.length
-            ? parseFloat(UPDATE_PRICE[UPDATE_PRICE.length - 1].data.p)
+          let entryPrice = UPDATE_PRICE.has(data.asset)
+            ? parseFloat(UPDATE_PRICE.get(data.asset))
             : NaN;
 
           // normalize type
           let orderType = data.type?.toUpperCase();
           if (orderType === "BUY") orderType = "LONG";
           if (orderType === "SELL") orderType = "SHORT";
-
           if (isNaN(entryPrice)) {
             await publishResponse(data.orderId, {
               status: "error",
@@ -172,7 +190,7 @@ while (true) {
           if (order) {
             BALANCE += order.margin;
             OPEN_ORDERS = OPEN_ORDERS.filter((o) => o.orderId !== data.orderId);
-      
+
             await publishResponse(data.orderId, {
               status: "closed",
               orderId: data.orderId,
@@ -195,7 +213,6 @@ while (true) {
         }
 
         case "CHECK_USD_BALANCE": {
-          console.log("USD Balance check", data.userId, BALANCE);
           await publishResponse(data.orderId, {
             usdBalance: BALANCE,
           });
