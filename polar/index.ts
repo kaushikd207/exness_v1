@@ -18,32 +18,29 @@ ws.on("open", function open() {
   ws.send(
     JSON.stringify({
       method: "SUBSCRIBE",
-      params: ["trade.SOL_USDC_PERP", "trade.BTC_USDT_PERP"],
+      params: ["bookTicker.SOL_USDC_PERP", "bookTicker.SOL_USDC"],
     })
   );
 });
 
 ws.on("message", async function message(data) {
   const trade = JSON.parse(data.toString());
-  console.log(trade);
-  const jsonTrade = JSON.stringify(trade);
-  publisher.publish("trades", jsonTrade);
+  // console.log(trade);
+  const latest_price = {
+    symbol: trade.data.s,
+    bids: trade.data.b * 1.01,
+    asks: trade.data.a * 0.99
+  }
 
-  addUpdatedPrice(jsonTrade);
-
-  //   if (trade.e === "trade") {
-  //     console.log(`Trade: Price - ${trade.p}, Quantity - ${trade.q}`);
-  //   }
+  const jsonTrade = JSON.stringify(latest_price);
+  console.log(jsonTrade)
+  publisherStream.xAdd("trades", "*", {
+      action: "UPDATED_PRICE",
+      data: jsonTrade,
+    });
 });
 
-const addUpdatedPrice = (jsonTrade: any) => [
-  setInterval(async () => {
-    await publisherStream.xAdd("trades", "*", {
-      action: "UPDATED_PRICE",
-      updatedPrice: jsonTrade,
-    });
-  }, 100),
-];
+
 
 ws.on("close", function close() {
   console.log("disconnected");

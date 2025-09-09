@@ -1,4 +1,4 @@
-import express from "express";
+import express, { type Request } from "express";
 import nodemailer from "nodemailer";
 import jwt from "jsonwebtoken";
 import redis from "redis";
@@ -21,35 +21,39 @@ async function sendAndWaitResponse(
   res: any
 ) {
   return new Promise(async (resolve, reject) => {
-    const timeout = setTimeout(() => {
+    let timeout = setTimeout(() => {
       reject(new Error("Timeout: No response from engine"));
-    }, 10000);
-    await publisher.xAdd("trades", "*", payload);
+    }, 20000);
+
+    const action = payload.action;
+    await publisher.xAdd("trades", "*", {
+      action,
+      data: JSON.stringify(payload),
+    });
 
     try {
       let lastId = "$";
 
       while (true) {
-        const messages:any = await client.xRead(
+        const messages: any = await client.xRead(
           [{ key: "trade_responses", id: lastId }],
           { BLOCK: 0, COUNT: 1 }
         );
-
-        console.log(messages);
 
         if (!messages) continue;
 
         for (const stream of messages) {
           for (const msg of stream.messages) {
             lastId = msg.id;
-            console.log("msg", msg);
+
+            console.log("msg from engine", msg.message); // ✅ use .message, not .messages
+
             const { orderId: respOrderId, response } = msg.message;
             if (respOrderId === orderId) {
-              console.log(response);
-
               res.json({ message: JSON.parse(response) });
               clearTimeout(timeout);
-              return resolve(true);
+              resolve(true);
+              return;
             }
           }
         }
@@ -61,7 +65,74 @@ async function sendAndWaitResponse(
   });
 }
 
-app.post("/signup", (req, res) => {
+// async function sendAndWaitResponse(
+//   orderId: string,
+//   payload: Record<string, any>,
+//   res: any
+// ) {
+//   return new Promise(async (resolve, reject) => {
+//     const timeout = setTimeout(() => {
+//       reject(new Error("Timeout: No response from engine"));
+//     }, 20000);
+
+//     try {
+//       const action = payload.action;
+
+//       // 1️⃣ Publish request
+//       await publisher.xAdd("trades", "*", {
+//         action,
+//         data: JSON.stringify(payload),
+//       });
+
+//       // 2️⃣ Pre-check if response already exists
+//       const latest = await client.xRevRange("trade_responses", "+", "-", {
+//         COUNT: 50, // check last 50 messages (tune as needed)
+//       });
+
+//       for (const msg of latest) {
+//         const { orderId: respOrderId, response } = msg.message;
+//         if (respOrderId === orderId) {
+//           res.json({ message: JSON.parse(response) });
+//           clearTimeout(timeout);
+//           return resolve(true);
+//         }
+//       }
+
+//       // 3️⃣ If not found, wait for new messages
+//       let lastId = "$"; // now safe to only watch new ones
+//       while (true) {
+//         const messages: any = await client.xRead(
+//           [{ key: "trade_responses", id: lastId }],
+//           { BLOCK: 5000, COUNT: 1 } // wait up to 5s per loop
+//         );
+
+//         if (!messages) continue;
+
+//         for (const stream of messages) {
+//           for (const msg of stream.messages) {
+//             lastId = msg.id;
+
+//             console.log("msg from engine", msg.message);
+
+//             const { orderId: respOrderId, response } = msg.message;
+//             if (respOrderId === orderId) {
+//               res.json({ message: JSON.parse(response) });
+//               clearTimeout(timeout);
+//               return resolve(true);
+//             }
+//           }
+//         }
+//       }
+//     } catch (err) {
+//       clearTimeout(timeout);
+//       reject(err);
+//     }
+//   });
+// }
+
+app.post("/signup", async (req: customRequest, res) => {
+  const userId = req.userId;
+  const orderId = uuidv4();
   const { email } = req.body;
 
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -90,15 +161,25 @@ app.post("/signup", (req, res) => {
     html: `Please verify this mail <a href="http://localhost:3000/verify/${token}">Verify</a>`,
   });
 
+  await sendAndWaitResponse(orderId, { action: "SIGN_UP", userId }, res);
+
   res.json({ message: "Verification email sent" });
 });
 
-app.get("/verify/:token", (req, res) => {
+interface customRequest extends Request {
+  userId?: string;
+}
+app.get("/verify/:token", (req: customRequest, res) => {
   const { token } = req.params;
   jwt.verify(token, "kaushik", (err) => {
     if (err) {
       return res.status(400).json({ message: "Invalid or expired token" });
     }
+    const userId = uuidv4();
+
+    //save on database user
+
+    req.userId = userId;
     res.json({ message: "Email verified successfully" });
   });
 });
@@ -138,8 +219,9 @@ app.post("/api/v1/trade/close", async (req, res) => {
   );
 });
 
-app.get("/api/v1/balance", async (req, res) => {
-  const { userId } = req.query;
+app.get("/api/v1/balance", async (req: customRequest, res) => {
+  // const { userId } = req.query;
+  const userId = req.userId;
   const orderId = uuidv4();
 
   await sendAndWaitResponse(
@@ -149,8 +231,9 @@ app.get("/api/v1/balance", async (req, res) => {
   );
 });
 
-app.get("/api/v1/balance_usd", async (req, res) => {
-  const { userId } = req.query;
+app.get("/api/v1/usd_balance", async (req: customRequest, res) => {
+  // const { userId } = req.query;
+  const userId = req.userId;
   const orderId = uuidv4();
 
   await sendAndWaitResponse(
